@@ -46,9 +46,11 @@
     border-radius:999px;padding:12px 22px}
 
   #hud{position:fixed;left:0;right:0;bottom:max(18px,env(safe-area-inset-bottom));z-index:3;
-    display:none;justify-content:center;pointer-events:none}
+    display:none;flex-direction:column;align-items:center;gap:10px;pointer-events:none}
   #hud span{background:rgba(18,19,42,.62);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
     padding:9px 16px;border-radius:999px;font-size:.85rem;color:var(--mist)}
+  #placeBtn{pointer-events:auto;font:inherit;font-weight:600;font-size:.95rem;color:var(--ink);
+    background:var(--gold);border:0;border-radius:999px;padding:11px 22px;cursor:pointer}
 </style>
 </head>
 <body>
@@ -60,11 +62,11 @@
   <h1>Tu carta, flotando frente a ti</h1>
   <p>Activa la cámara y la carta aparece en 3D sobre lo que estés viendo. Arrástrala para girarla y toca para voltearla.</p>
   <button id="start" type="button">Activar cámara</button>
-  <button id="startAR" type="button" hidden>Colocar en la mesa</button>
+  <button id="startAR" type="button">Colocar en la mesa</button>
   <div id="msg" role="status" aria-live="polite"></div>
 </section>
 
-<div id="hud"><span>Arrastra para girar · Pellizca para escalar · Toca para voltear</span></div>
+<div id="hud"><span id="hudText">Arrastra para girar · Pellizca para escalar · Toca para voltear</span><button id="placeBtn" type="button" hidden>Fijar aquí</button></div>
 
 <div id="arUi">
   <p id="arHint">Mueve el celular despacio hacia la mesa o el piso</p>
@@ -354,8 +356,28 @@
   canvas.addEventListener('pointerup', endPointer);
   canvas.addEventListener('pointercancel', endPointer);
 
+  // Modo giroscopio: la cámara gira con el celular y la carta se queda fija en el espacio
+  let gyroOn = false;
+  let devA = null, devB = null, devG = null;
+  const _zee = new THREE.Vector3(0, 0, 1);
+  const _euler = new THREE.Euler();
+  const _q0 = new THREE.Quaternion();
+  const _q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+  function applyDeviceOrientation(q, a, b, g, o) {
+    _euler.set(b, a, -g, 'YXZ');
+    q.setFromEuler(_euler);
+    q.multiply(_q1);
+    q.multiply(_q0.setFromAxisAngle(_zee, -o));
+  }
+  function screenAngle() {
+    return (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  }
+
   window.addEventListener('deviceorientation', e => {
     if (e.gamma == null || e.beta == null) return;
+    devA = e.alpha == null ? 0 : e.alpha;
+    devB = e.beta;
+    devG = e.gamma;
     tiltDev.x = clamp(e.gamma / 45, -1, 1) * 0.35;
     tiltDev.y = clamp((e.beta - 50) / 45, -1, 1) * 0.3;
   });
@@ -364,6 +386,14 @@
   function render(ms, frame) {
     const time = ms / 1000;
     const inAR = !!arSession;
+
+    if (gyroOn) {
+      camera.position.set(0, 0, 0);
+      if (devA !== null) {
+        const d = Math.PI / 180;
+        applyDeviceOrientation(camera.quaternion, devA * d, devB * d, devG * d, screenAngle() * d);
+      }
+    }
 
     if (inAR && frame) {
       const refSpace = renderer.xr.getReferenceSpace();
@@ -396,16 +426,16 @@
     const bob = reduceMotion ? 0 : Math.sin(time * 1.1) * (inAR ? 0.12 : 0.06);
     const nod = reduceMotion ? 0 : Math.cos(time * 0.6) * 0.06;
 
-    const ry = flipCur + dragY + sway + (inAR ? 0 : tiltDev.x);
-    const rx = dragX + nod + (inAR ? 0 : tiltDev.y);
+    const ry = flipCur + dragY + sway + (inAR || gyroOn ? 0 : tiltDev.x);
+    const rx = dragX + nod + (inAR || gyroOn ? 0 : tiltDev.y);
     card.rotation.set(rx, ry, 0);
     card.position.y = (inAR ? CH / 2 + 0.73 : 0) + bob;   // en AR flota ~4 cm sobre la mesa
     card.scale.setScalar(inAR ? 1 : curScale);
     anchor.visible = !inAR || placed;
 
-    if (inAR && placed) {
+    if ((inAR && placed) || gyroOn) {
       // el brillo depende de desde dónde miras la carta
-      camPos.setFromMatrixPosition(camera.matrixWorld);
+      if (gyroOn) camPos.set(0, 0, 0); else camPos.setFromMatrixPosition(camera.matrixWorld);
       anchor.updateMatrixWorld(true);
       tmpV.copy(camPos);
       card.worldToLocal(tmpV).normalize();
@@ -422,23 +452,23 @@
   // ───────────── Cámara ─────────────
   const intro = document.getElementById('intro');
   const hud = document.getElementById('hud');
+  const hudText = document.getElementById('hudText');
+  const placeBtn = document.getElementById('placeBtn');
   const msg = document.getElementById('msg');
   const video = document.getElementById('cam');
   const startBtn = document.getElementById('start');
 
-  startBtn.addEventListener('click', async () => {
-    startBtn.disabled = true;
-    msg.textContent = 'Pidiendo permiso…';
-
-    // iOS exige un permiso explícito para el giroscopio
+  // iOS exige un permiso explícito para el giroscopio
+  async function askMotion() {
     try {
       if (typeof DeviceOrientationEvent !== 'undefined' &&
           typeof DeviceOrientationEvent.requestPermission === 'function') {
         await DeviceOrientationEvent.requestPermission();
       }
     } catch (_) { /* el giroscopio es opcional */ }
+  }
 
-    let camOk = false;
+  async function openCamera() {
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('sin-api');
@@ -450,24 +480,57 @@
       video.srcObject = stream;
       video.style.display = 'block';
       await video.play();
-      camOk = true;
+      return true;
     } catch (err) {
       console.warn('Cámara no disponible:', err);
+      return false;
     }
+  }
 
+  // Modo simple: la carta flota fija frente a la pantalla
+  startBtn.addEventListener('click', async () => {
+    startBtn.disabled = true;
+    msg.textContent = 'Pidiendo permiso…';
+    await askMotion();
+    const camOk = await openCamera();
     intro.style.display = 'none';
     hud.style.display = 'flex';
     if (!camOk) {
-      hud.firstElementChild.textContent = 'Sin cámara: abre esta página con https:// y acepta el permiso';
+      hudText.textContent = 'Sin cámara: abre esta página con https:// y acepta el permiso';
     }
   });
+
+  // Modo giroscopio: la carta se queda en un punto del espacio mientras mueves el celular
+  function placeHere() {
+    const f = tmpV.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    anchor.position.copy(f).multiplyScalar(7);
+    anchor.rotation.set(0, Math.atan2(-anchor.position.x, -anchor.position.z), 0);
+  }
+
+  async function startGyro() {
+    startBtn.disabled = true;
+    msg.textContent = 'Pidiendo permiso…';
+    await askMotion();
+    const camOk = await openCamera();
+    gyroOn = true;
+    camera.position.set(0, 0, 0);
+    intro.style.display = 'none';
+    hud.style.display = 'flex';
+    placeBtn.hidden = false;
+    hudText.textContent = camOk
+      ? 'La carta se queda en su sitio: mueve el celular alrededor'
+      : 'Sin cámara: abre esta página con https:// y acepta el permiso';
+    setTimeout(placeHere, 400);
+  }
+  placeBtn.addEventListener('click', placeHere);
 
   // ───────────── Iniciar modo AR (colocar en la mesa) ─────────────
   const startARBtn = document.getElementById('startAR');
 
+  let xrOk = false;
   if (navigator.xr && navigator.xr.isSessionSupported) {
     navigator.xr.isSessionSupported('immersive-ar')
-      .then(ok => { if (ok) startARBtn.hidden = false; })
+      .then(ok => { xrOk = ok; })
       .catch(() => {});
   }
 
@@ -501,13 +564,24 @@
 
   startARBtn.addEventListener('click', async () => {
     msg.textContent = 'Iniciando AR…';
+    if (!xrOk) { startGyro(); return; }
+    let session = null;
     try {
       arUi.classList.add('on');
-      const session = await navigator.xr.requestSession('immersive-ar', {
-        requiredFeatures: ['hit-test'],
-        optionalFeatures: ['dom-overlay'],
-        domOverlay: { root: arUi }
-      });
+      try {
+        // primero con los botones sobre la cámara
+        session = await navigator.xr.requestSession('immersive-ar', {
+          requiredFeatures: ['hit-test'],
+          optionalFeatures: ['dom-overlay'],
+          domOverlay: { root: arUi }
+        });
+      } catch (e1) {
+        // si falla, se intenta en su forma más simple
+        console.warn('AR con botones falló, reintentando simple:', e1);
+        session = await navigator.xr.requestSession('immersive-ar', {
+          requiredFeatures: ['hit-test']
+        });
+      }
       session.addEventListener('select', onSelect);
       session.addEventListener('end', onARend);
       await renderer.xr.setSession(session);
@@ -517,8 +591,13 @@
       intro.style.display = 'none';
     } catch (err) {
       console.warn('No se pudo iniciar AR:', err);
+      const detail = err ? ((err.name || 'Error') + ': ' + (err.message || '')) : 'Error desconocido';
+      try { if (session) await session.end(); } catch (_) {}
       arUi.classList.remove('on');
-      msg.textContent = 'Este celular no pudo iniciar el modo AR.';
+      console.warn('Detalle:', detail);
+      await new Promise(r => setTimeout(r, 300));
+      msg.textContent = 'AR avanzada no disponible. Usando modo giroscopio…';
+      startGyro();
     }
   });
 
