@@ -32,6 +32,18 @@
     color:var(--ink);background:var(--gold);border:0;border-radius:999px;padding:15px 28px;cursor:pointer}
   #start:focus-visible{outline:3px solid var(--teal);outline-offset:3px}
   #msg{margin-top:14px;min-height:1.3em;font-size:.9rem;color:var(--teal)}
+  #startAR{margin-top:12px;align-self:flex-start;font:inherit;font-weight:600;font-size:1.05rem;
+    color:var(--gold);background:transparent;border:2px solid var(--gold);border-radius:999px;padding:13px 26px;cursor:pointer}
+  #startAR:focus-visible{outline:3px solid var(--teal);outline-offset:3px}
+
+  #arUi{position:fixed;inset:0;z-index:10;display:none;pointer-events:none;flex-direction:column;
+    justify-content:space-between;padding:max(16px,env(safe-area-inset-top)) 16px max(20px,env(safe-area-inset-bottom))}
+  #arUi.on{display:flex}
+  #arUi p{align-self:center;background:rgba(18,19,42,.72);padding:10px 16px;border-radius:14px;
+    font-size:.9rem;text-align:center;max-width:30ch;line-height:1.35}
+  #arUi .arBtns{display:flex;gap:10px;justify-content:center;pointer-events:auto}
+  #arUi button{font:inherit;font-weight:600;color:var(--ink);background:var(--gold);border:0;
+    border-radius:999px;padding:12px 22px}
 
   #hud{position:fixed;left:0;right:0;bottom:max(18px,env(safe-area-inset-bottom));z-index:3;
     display:none;justify-content:center;pointer-events:none}
@@ -48,10 +60,19 @@
   <h1>Tu carta, flotando frente a ti</h1>
   <p>Activa la cámara y la carta aparece en 3D sobre lo que estés viendo. Arrástrala para girarla y toca para voltearla.</p>
   <button id="start" type="button">Activar cámara</button>
+  <button id="startAR" type="button" hidden>Colocar en la mesa</button>
   <div id="msg" role="status" aria-live="polite"></div>
 </section>
 
 <div id="hud"><span>Arrastra para girar · Pellizca para escalar · Toca para voltear</span></div>
+
+<div id="arUi">
+  <p id="arHint">Mueve el celular despacio hacia la mesa o el piso</p>
+  <div class="arBtns">
+    <button id="arFlip" type="button">Voltear</button>
+    <button id="arExit" type="button">Salir</button>
+  </div>
+</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -184,6 +205,8 @@
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setClearColor(0x000000, 0);
+  renderer.xr.enabled = true;
+  renderer.xr.setReferenceSpaceType('local');
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 50);
@@ -201,8 +224,10 @@
   resize();
 
   const CW = 2.29, CH = 3.2, THICK = 0.03;
+  const anchor = new THREE.Group();
+  scene.add(anchor);
   const card = new THREE.Group();
-  scene.add(card);
+  anchor.add(card);
 
   const uniforms = {
     uMap: { value: null },
@@ -265,6 +290,24 @@
   const edge = new THREE.Mesh(new THREE.BoxGeometry(CW, CH, THICK), new THREE.MeshBasicMaterial({ color: 0x15101c }));
   card.add(edge, front, back);
 
+  // ───────────── Estado del modo AR ─────────────
+  const arUi = document.getElementById('arUi');
+  const arHint = document.getElementById('arHint');
+  const AR_SCALE = 0.055;           // la carta mide unos 18 cm de alto en la mesa
+  let arSession = null, hitSource = null, hitRequested = false, placed = false;
+  const tmpQ = new THREE.Quaternion();
+  const tmpS = new THREE.Vector3();
+  const tmpV = new THREE.Vector3();
+  const camPos = new THREE.Vector3();
+
+  const reticle = new THREE.Mesh(
+    new THREE.RingGeometry(0.07, 0.09, 40).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0x4fd1c5 })
+  );
+  reticle.matrixAutoUpdate = false;
+  reticle.visible = false;
+  scene.add(reticle);
+
   // ───────────── Interacción ─────────────
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -318,29 +361,63 @@
   });
 
   // ───────────── Bucle de render ─────────────
-  function tick(ms) {
+  function render(ms, frame) {
     const time = ms / 1000;
+    const inAR = !!arSession;
+
+    if (inAR && frame) {
+      const refSpace = renderer.xr.getReferenceSpace();
+      if (!hitRequested) {
+        hitRequested = true;
+        arSession.requestReferenceSpace('viewer')
+          .then(vs => arSession.requestHitTestSource({ space: vs }))
+          .then(src => { hitSource = src; })
+          .catch(err => console.warn('Detección de superficies no disponible:', err));
+      }
+      if (hitSource) {
+        const hits = frame.getHitTestResults(hitSource);
+        if (hits.length) {
+          const pose = hits[0].getPose(refSpace);
+          if (pose) { reticle.visible = true; reticle.matrix.fromArray(pose.transform.matrix); }
+        } else {
+          reticle.visible = false;
+        }
+      }
+      const txt = !reticle.visible ? 'Mueve el celular despacio hacia la mesa o el piso'
+        : placed ? 'Toca para mover la carta' : 'Toca para colocar la carta';
+      if (arHint.textContent !== txt) arHint.textContent = txt;
+    }
+
     if (pts.size === 0) { dragX *= 0.94; dragY *= 0.94; }
     flipCur += (flipTarget - flipCur) * 0.12;
     curScale += (targetScale - curScale) * 0.15;
 
     const sway = reduceMotion ? 0 : Math.sin(time * 0.8) * 0.12;
-    const bob = reduceMotion ? 0 : Math.sin(time * 1.1) * 0.06;
+    const bob = reduceMotion ? 0 : Math.sin(time * 1.1) * (inAR ? 0.12 : 0.06);
     const nod = reduceMotion ? 0 : Math.cos(time * 0.6) * 0.06;
 
-    const ry = flipCur + dragY + sway + tiltDev.x;
-    const rx = dragX + nod + tiltDev.y;
+    const ry = flipCur + dragY + sway + (inAR ? 0 : tiltDev.x);
+    const rx = dragX + nod + (inAR ? 0 : tiltDev.y);
     card.rotation.set(rx, ry, 0);
-    card.position.y = bob;
-    card.scale.setScalar(curScale);
+    card.position.y = (inAR ? CH / 2 + 0.73 : 0) + bob;   // en AR flota ~4 cm sobre la mesa
+    card.scale.setScalar(inAR ? 1 : curScale);
+    anchor.visible = !inAR || placed;
 
-    uniforms.uTilt.value.set(Math.sin(ry), Math.sin(rx));
+    if (inAR && placed) {
+      // el brillo depende de desde dónde miras la carta
+      camPos.setFromMatrixPosition(camera.matrixWorld);
+      anchor.updateMatrixWorld(true);
+      tmpV.copy(camPos);
+      card.worldToLocal(tmpV).normalize();
+      uniforms.uTilt.value.set(-tmpV.x, tmpV.y);
+    } else {
+      uniforms.uTilt.value.set(Math.sin(ry), Math.sin(rx));
+    }
     uniforms.uTime.value = time;
 
     renderer.render(scene, camera);
-    requestAnimationFrame(tick);
   }
-  requestAnimationFrame(tick);
+  renderer.setAnimationLoop(render);
 
   // ───────────── Cámara ─────────────
   const intro = document.getElementById('intro');
@@ -384,6 +461,71 @@
       hud.firstElementChild.textContent = 'Sin cámara: abre esta página con https:// y acepta el permiso';
     }
   });
+
+  // ───────────── Iniciar modo AR (colocar en la mesa) ─────────────
+  const startARBtn = document.getElementById('startAR');
+
+  if (navigator.xr && navigator.xr.isSessionSupported) {
+    navigator.xr.isSessionSupported('immersive-ar')
+      .then(ok => { if (ok) startARBtn.hidden = false; })
+      .catch(() => {});
+  }
+
+  function onSelect() {
+    if (!arSession || !reticle.visible) return;
+    reticle.matrix.decompose(anchor.position, tmpQ, tmpS);
+    anchor.scale.setScalar(AR_SCALE);
+    camPos.setFromMatrixPosition(camera.matrixWorld);
+    // la carta se coloca de pie, mirando hacia ti
+    anchor.rotation.set(0, Math.atan2(camPos.x - anchor.position.x, camPos.z - anchor.position.z), 0);
+    placed = true;
+  }
+
+  function onARend() {
+    arSession = null; hitSource = null; hitRequested = false; placed = false;
+    reticle.visible = false;
+    anchor.position.set(0, 0, 0);
+    anchor.rotation.set(0, 0, 0);
+    anchor.scale.setScalar(1);
+    anchor.visible = true;
+    camera.position.set(0, 0, 7);
+    camera.quaternion.set(0, 0, 0, 1);
+    camera.updateMatrixWorld(true);
+    resize();
+    arUi.classList.remove('on');
+    intro.style.display = 'flex';
+    hud.style.display = 'none';
+    startBtn.disabled = false;
+    msg.textContent = '';
+  }
+
+  startARBtn.addEventListener('click', async () => {
+    msg.textContent = 'Iniciando AR…';
+    try {
+      arUi.classList.add('on');
+      const session = await navigator.xr.requestSession('immersive-ar', {
+        requiredFeatures: ['hit-test'],
+        optionalFeatures: ['dom-overlay'],
+        domOverlay: { root: arUi }
+      });
+      session.addEventListener('select', onSelect);
+      session.addEventListener('end', onARend);
+      await renderer.xr.setSession(session);
+      arSession = session;
+      hitRequested = false;
+      placed = false;
+      intro.style.display = 'none';
+    } catch (err) {
+      console.warn('No se pudo iniciar AR:', err);
+      arUi.classList.remove('on');
+      msg.textContent = 'Este celular no pudo iniciar el modo AR.';
+    }
+  });
+
+  document.getElementById('arFlip').addEventListener('click', () => { flipTarget += Math.PI; });
+  document.getElementById('arExit').addEventListener('click', () => { if (arSession) arSession.end(); });
+  ['arFlip', 'arExit'].forEach(id =>
+    document.getElementById(id).addEventListener('beforexrselect', e => e.preventDefault()));
 })();
 </script>
 </body>
