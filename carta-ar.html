@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Carta 3D en tu cámara</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#12132a;
+    --gold:#e0b85c;
+    --mist:#f2efe6;
+    --teal:#4fd1c5;
+    color-scheme: dark;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;overflow:hidden;background:var(--ink);color:var(--mist);
+    font-family:'Bricolage Grotesque',system-ui,sans-serif;touch-action:none;overscroll-behavior:none}
+  #fallback{position:fixed;inset:0;
+    background:radial-gradient(120% 80% at 50% 30%,#2a2c5e 0%,var(--ink) 70%)}
+  #cam{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;display:none}
+  #stage{position:fixed;inset:0;width:100%;height:100%;display:block}
+
+  #intro{position:fixed;inset:0;display:flex;flex-direction:column;justify-content:flex-end;
+    padding:max(28px,env(safe-area-inset-top)) 24px max(36px,env(safe-area-inset-bottom));
+    background:linear-gradient(180deg,rgba(18,19,42,.15) 0%,rgba(18,19,42,.92) 55%);z-index:5}
+  #intro h1{font-weight:800;font-size:clamp(2rem,9vw,3rem);line-height:1.02;letter-spacing:-.02em;max-width:12ch}
+  #intro p{margin-top:14px;max-width:34ch;line-height:1.45;color:#d6d2c4}
+  #start{margin-top:26px;align-self:flex-start;font:inherit;font-weight:600;font-size:1.05rem;
+    color:var(--ink);background:var(--gold);border:0;border-radius:999px;padding:15px 28px;cursor:pointer}
+  #start:focus-visible{outline:3px solid var(--teal);outline-offset:3px}
+  #msg{margin-top:14px;min-height:1.3em;font-size:.9rem;color:var(--teal)}
+
+  #hud{position:fixed;left:0;right:0;bottom:max(18px,env(safe-area-inset-bottom));z-index:3;
+    display:none;justify-content:center;pointer-events:none}
+  #hud span{background:rgba(18,19,42,.62);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    padding:9px 16px;border-radius:999px;font-size:.85rem;color:var(--mist)}
+</style>
+</head>
+<body>
+<div id="fallback"></div>
+<video id="cam" playsinline muted autoplay></video>
+<canvas id="stage"></canvas>
+
+<section id="intro">
+  <h1>Tu carta, flotando frente a ti</h1>
+  <p>Activa la cámara y la carta aparece en 3D sobre lo que estés viendo. Arrástrala para girarla y toca para voltearla.</p>
+  <button id="start" type="button">Activar cámara</button>
+  <div id="msg" role="status" aria-live="polite"></div>
+</section>
+
+<div id="hud"><span>Arrastra para girar · Pellizca para escalar · Toca para voltear</span></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+  // ───────────── Configuración fácil de cambiar ─────────────
+  // Para usar tu propia ilustración: pon aquí la ruta de una imagen
+  // que esté en la misma carpeta que este archivo, por ejemplo 'arte.jpg'.
+  const ART_URL = '';
+  const CARD = {
+    name: 'Dragón del Alba',
+    type: '[ Dragón / Efecto ]',
+    text: 'Una vez por turno, puedes invocar un monstruo de Luz desde tu mano. Mientras esta carta esté en el campo, tus monstruos de Luz no pueden ser destruidos por efectos.',
+    atk: 3000, def: 2500, level: 8
+  };
+
+  // ───────────── Textura de la carta (canvas 2D) ─────────────
+  const W = 744, H = 1039;
+
+  function star(ctx, cx, cy, r) {
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const a = -Math.PI / 2 + i * Math.PI / 5;
+      const rr = i % 2 ? r * 0.45 : r;
+      ctx.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function wrap(ctx, text, x, y, maxW, lh) {
+    const words = text.split(' ');
+    let line = '';
+    for (const w of words) {
+      const test = line ? line + ' ' + w : w;
+      if (ctx.measureText(test).width > maxW && line) {
+        ctx.fillText(line, x, y);
+        line = w; y += lh;
+      } else line = test;
+    }
+    ctx.fillText(line, x, y);
+  }
+
+  function drawArt(ctx, x, y, w, h) {
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    const sky = ctx.createLinearGradient(0, y, 0, y + h);
+    sky.addColorStop(0, '#1b1f5c'); sky.addColorStop(.55, '#7a3f8f'); sky.addColorStop(1, '#f4a259');
+    ctx.fillStyle = sky; ctx.fillRect(x, y, w, h);
+    // rayos
+    ctx.translate(x + w / 2, y + h * 0.68);
+    for (let i = 0; i < 18; i++) {
+      ctx.rotate(Math.PI / 9);
+      ctx.fillStyle = 'rgba(255,232,170,.10)';
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-26, -h); ctx.lineTo(26, -h); ctx.fill();
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    // sol
+    const sun = ctx.createRadialGradient(x + w / 2, y + h * 0.68, 10, x + w / 2, y + h * 0.68, 190);
+    sun.addColorStop(0, '#fff6d6'); sun.addColorStop(.35, 'rgba(255,214,120,.85)'); sun.addColorStop(1, 'rgba(255,170,80,0)');
+    ctx.fillStyle = sun; ctx.fillRect(x, y, w, h);
+    // montañas
+    ctx.fillStyle = '#2b1740';
+    ctx.beginPath(); ctx.moveTo(x, y + h);
+    ctx.lineTo(x, y + h * .78); ctx.lineTo(x + w * .22, y + h * .6); ctx.lineTo(x + w * .38, y + h * .76);
+    ctx.lineTo(x + w * .6, y + h * .55); ctx.lineTo(x + w * .82, y + h * .74); ctx.lineTo(x + w, y + h * .64);
+    ctx.lineTo(x + w, y + h); ctx.fill();
+    ctx.fillStyle = '#150b24';
+    ctx.beginPath(); ctx.moveTo(x, y + h);
+    ctx.lineTo(x, y + h * .9); ctx.lineTo(x + w * .3, y + h * .8); ctx.lineTo(x + w * .55, y + h * .9);
+    ctx.lineTo(x + w * .8, y + h * .82); ctx.lineTo(x + w, y + h * .9); ctx.lineTo(x + w, y + h); ctx.fill();
+    ctx.restore();
+  }
+
+  function makeFront(art) {
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const ctx = c.getContext('2d');
+    // marco
+    const frame = ctx.createLinearGradient(0, 0, W, H);
+    frame.addColorStop(0, '#8a5a1f'); frame.addColorStop(.5, '#d9a441'); frame.addColorStop(1, '#6e4514');
+    ctx.fillStyle = frame; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#1a1424'; ctx.fillRect(26, 26, W - 52, H - 52);
+    // nombre
+    ctx.fillStyle = '#e9dcc0'; ctx.fillRect(48, 48, W - 96, 76);
+    ctx.fillStyle = '#2a1c10'; ctx.font = '700 44px Georgia, serif'; ctx.textBaseline = 'middle';
+    ctx.fillText(CARD.name, 66, 88);
+    // estrellas (nivel)
+    ctx.fillStyle = '#f2c94c';
+    for (let i = 0; i < CARD.level; i++) star(ctx, W - 80 - i * 40, 150, 15);
+    // arte
+    ctx.fillStyle = '#d9a441'; ctx.fillRect(54, 164, W - 108, 492);
+    if (art) {
+      ctx.drawImage(art, 60, 170, W - 120, 480);
+    } else {
+      drawArt(ctx, 60, 170, W - 120, 480);
+    }
+    // caja de texto
+    ctx.fillStyle = '#d8c79b'; ctx.fillRect(48, 684, W - 96, 258);
+    ctx.fillStyle = '#2a1c10'; ctx.textBaseline = 'alphabetic';
+    ctx.font = 'italic 700 26px Georgia, serif'; ctx.fillText(CARD.type, 62, 722);
+    ctx.font = '400 25px Georgia, serif'; wrap(ctx, CARD.text, 62, 760, W - 124, 32);
+    // stats
+    ctx.font = '700 32px Georgia, serif'; ctx.textAlign = 'right';
+    ctx.fillText('ATK/' + CARD.atk + '   DEF/' + CARD.def, W - 66, 926);
+    ctx.textAlign = 'left';
+    return c;
+  }
+
+  function makeBack() {
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#8a5a1f'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#241532'; ctx.fillRect(30, 30, W - 60, H - 60);
+    ctx.translate(W / 2, H / 2);
+    for (let i = 0; i < 48; i++) {
+      ctx.rotate(Math.PI / 24);
+      ctx.strokeStyle = i % 2 ? 'rgba(224,184,92,.55)' : 'rgba(122,63,143,.8)';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.ellipse(0, 130, 70, 260, 0, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const g = ctx.createRadialGradient(W / 2, H / 2, 10, W / 2, H / 2, 120);
+    g.addColorStop(0, '#fff2c4'); g.addColorStop(1, '#b07a2a');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(W / 2, H / 2, 105, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#241532'; ctx.lineWidth = 8; ctx.stroke();
+    return c;
+  }
+
+  // ───────────── Escena Three.js ─────────────
+  const canvas = document.getElementById('stage');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setClearColor(0x000000, 0);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 50);
+  camera.position.set(0, 0, 7);
+
+  function resize() {
+    const w = window.innerWidth, h = window.innerHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    // en pantallas angostas, alejar un poco para que la carta quepa entera
+    camera.position.z = camera.aspect < 0.7 ? 8.2 : 7;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const CW = 2.29, CH = 3.2, THICK = 0.03;
+  const card = new THREE.Group();
+  scene.add(card);
+
+  const uniforms = {
+    uMap: { value: null },
+    uTilt: { value: new THREE.Vector2(0, 0) },
+    uTime: { value: 0 }
+  };
+
+  const holoMat = new THREE.ShaderMaterial({
+    uniforms,
+    vertexShader: `
+      varying vec2 vUv;
+      void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+    `,
+    fragmentShader: `
+      precision highp float;
+      uniform sampler2D uMap; uniform vec2 uTilt; uniform float uTime; varying vec2 vUv;
+      float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      void main(){
+        vec4 tex = texture2D(uMap, vUv);
+        float artMask = step(0.0806, vUv.x) * step(vUv.x, 0.9194) * step(0.374, vUv.y) * step(vUv.y, 0.836);
+        float foil = mix(0.22, 1.0, artMask);
+        float t = vUv.x * 0.9 + vUv.y * 0.7 + uTilt.x * 1.1 + uTilt.y * 0.8 + uTime * 0.03;
+        vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (t + vec3(0.0, 0.33, 0.67)));
+        float band = 0.5 + 0.5 * sin((vUv.x + vUv.y) * 18.0 + uTilt.x * 9.0 + uTilt.y * 6.0);
+        vec3 holo = rainbow * (0.55 + 0.45 * band);
+        vec2 cell = floor(vUv * vec2(70.0, 98.0));
+        float r = hash(cell);
+        float spark = step(0.985, r) * (0.5 + 0.5 * sin(uTime * 3.0 + r * 40.0 + uTilt.x * 10.0));
+        vec2 g = vec2(0.5) + uTilt * vec2(0.6, -0.6);
+        float glare = exp(-pow(distance(vUv, g) * 2.6, 2.0));
+        float lum = dot(tex.rgb, vec3(0.33));
+        vec3 col = tex.rgb + holo * 0.38 * foil * (0.45 + lum) + spark * foil * 0.9 + glare * 0.2;
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `
+  });
+
+  const maxAniso = renderer.capabilities.getMaxAnisotropy();
+  function setFrontTexture(canvasEl) {
+    const tex = new THREE.CanvasTexture(canvasEl);
+    tex.anisotropy = maxAniso;
+    uniforms.uMap.value = tex;
+  }
+  setFrontTexture(makeFront(null));
+
+  if (ART_URL) {
+    const img = new Image();
+    img.onload = () => setFrontTexture(makeFront(img));
+    img.src = ART_URL;
+  }
+
+  const backTex = new THREE.CanvasTexture(makeBack());
+  backTex.anisotropy = maxAniso;
+
+  const front = new THREE.Mesh(new THREE.PlaneGeometry(CW, CH), holoMat);
+  front.position.z = THICK / 2 + 0.001;
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(CW, CH), new THREE.MeshBasicMaterial({ map: backTex }));
+  back.rotation.y = Math.PI;
+  back.position.z = -THICK / 2 - 0.001;
+  const edge = new THREE.Mesh(new THREE.BoxGeometry(CW, CH, THICK), new THREE.MeshBasicMaterial({ color: 0x15101c }));
+  card.add(edge, front, back);
+
+  // ───────────── Interacción ─────────────
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let dragX = 0, dragY = 0;
+  let flipTarget = 0, flipCur = 0;
+  let targetScale = 1, curScale = 1;
+  const tiltDev = { x: 0, y: 0 };
+
+  const pts = new Map();
+  let startPinch = 0, startScale = 1, moved = 0, downT = 0;
+  const pinchDist = () => {
+    const [a, b] = [...pts.values()];
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  };
+
+  canvas.addEventListener('pointerdown', e => {
+    canvas.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 1) { moved = 0; downT = performance.now(); }
+    if (pts.size === 2) { startPinch = pinchDist(); startScale = targetScale; }
+  });
+  canvas.addEventListener('pointermove', e => {
+    const p = pts.get(e.pointerId);
+    if (!p) return;
+    const dx = e.clientX - p.x, dy = e.clientY - p.y;
+    p.x = e.clientX; p.y = e.clientY;
+    if (pts.size === 1) {
+      dragY += dx * 0.01;
+      dragX = clamp(dragX + dy * 0.01, -0.9, 0.9);
+      moved += Math.abs(dx) + Math.abs(dy);
+    } else if (pts.size === 2) {
+      targetScale = clamp(startScale * pinchDist() / startPinch, 0.5, 2);
+      moved += 99;
+    }
+  });
+  const endPointer = e => {
+    if (!pts.has(e.pointerId)) return;
+    pts.delete(e.pointerId);
+    if (pts.size === 0 && moved < 8 && performance.now() - downT < 300) {
+      flipTarget += Math.PI; // voltear
+    }
+  };
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+
+  window.addEventListener('deviceorientation', e => {
+    if (e.gamma == null || e.beta == null) return;
+    tiltDev.x = clamp(e.gamma / 45, -1, 1) * 0.35;
+    tiltDev.y = clamp((e.beta - 50) / 45, -1, 1) * 0.3;
+  });
+
+  // ───────────── Bucle de render ─────────────
+  function tick(ms) {
+    const time = ms / 1000;
+    if (pts.size === 0) { dragX *= 0.94; dragY *= 0.94; }
+    flipCur += (flipTarget - flipCur) * 0.12;
+    curScale += (targetScale - curScale) * 0.15;
+
+    const sway = reduceMotion ? 0 : Math.sin(time * 0.8) * 0.12;
+    const bob = reduceMotion ? 0 : Math.sin(time * 1.1) * 0.06;
+    const nod = reduceMotion ? 0 : Math.cos(time * 0.6) * 0.06;
+
+    const ry = flipCur + dragY + sway + tiltDev.x;
+    const rx = dragX + nod + tiltDev.y;
+    card.rotation.set(rx, ry, 0);
+    card.position.y = bob;
+    card.scale.setScalar(curScale);
+
+    uniforms.uTilt.value.set(Math.sin(ry), Math.sin(rx));
+    uniforms.uTime.value = time;
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  // ───────────── Cámara ─────────────
+  const intro = document.getElementById('intro');
+  const hud = document.getElementById('hud');
+  const msg = document.getElementById('msg');
+  const video = document.getElementById('cam');
+  const startBtn = document.getElementById('start');
+
+  startBtn.addEventListener('click', async () => {
+    startBtn.disabled = true;
+    msg.textContent = 'Pidiendo permiso…';
+
+    // iOS exige un permiso explícito para el giroscopio
+    try {
+      if (typeof DeviceOrientationEvent !== 'undefined' &&
+          typeof DeviceOrientationEvent.requestPermission === 'function') {
+        await DeviceOrientationEvent.requestPermission();
+      }
+    } catch (_) { /* el giroscopio es opcional */ }
+
+    let camOk = false;
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('sin-api');
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false
+      });
+      video.srcObject = stream;
+      video.style.display = 'block';
+      await video.play();
+      camOk = true;
+    } catch (err) {
+      console.warn('Cámara no disponible:', err);
+    }
+
+    intro.style.display = 'none';
+    hud.style.display = 'flex';
+    if (!camOk) {
+      hud.firstElementChild.textContent = 'Sin cámara: abre esta página con https:// y acepta el permiso';
+    }
+  });
+})();
+</script>
+</body>
+</html>
